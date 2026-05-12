@@ -20,8 +20,8 @@ export function getUserSessionMessages(sessionId) {
   return request.get(`/psychological-chat/sessions/${sessionId}/messages`)
 }
 
-export function startChatSession(data) {
-  return request.post('/psychological-chat/session/start', data)
+export function startChatSession(data, config = {}) {
+  return request.post('/psychological-chat/session/start', data, config)
 }
 
 export function deleteUserSession(sessionId) {
@@ -72,7 +72,7 @@ function readStreamPayload(payload) {
   )
 }
 
-export async function streamChatMessage(data, onChunk) {
+export async function streamChatMessage(data, onChunk, options = {}) {
   const token = localStorage.getItem('token')
   const response = await fetch('/api/psychological-chat/stream', {
     method: 'POST',
@@ -81,7 +81,8 @@ export async function streamChatMessage(data, onChunk) {
       Accept: 'text/event-stream',
       ...(token ? { token } : {})
     },
-    body: JSON.stringify(data)
+    body: JSON.stringify(data),
+    signal: options.signal
   })
 
   if (!response.ok) {

@@ -61,7 +61,7 @@
               <span>{{ isUserMessage(message) ? '我' : 'AI 助手' }}</span>
               <span>{{ message.createdAt || message.createTime || '' }}</span>
             </div>
-            <p>{{ message.content || message.messageContent || '正在生成回复...' }}</p>
+            <div class="message-content" v-html="renderMessageContent(message)"></div>
           </div>
         </div>
       </div>
@@ -76,7 +76,17 @@
           placeholder="输入你想咨询的内容"
           @keydown.enter.exact.prevent="sendMessage"
         />
-        <el-button type="primary" :loading="sending" :icon="Promotion" @click="sendMessage">
+        <el-button
+          v-if="sending"
+          class="composer-action"
+          type="danger"
+          plain
+          :icon="CircleClose"
+          @click="stopGenerating"
+        >
+          停止生成
+        </el-button>
+        <el-button v-else class="composer-action" type="primary" :icon="Promotion" @click="sendMessage">
           发送
         </el-button>
       </div>
@@ -117,9 +127,10 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, ref } from 'vue'
-import { Delete, Plus, Promotion, TrendCharts } from '@element-plus/icons-vue'
+import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { CircleClose, Delete, Plus, Promotion, TrendCharts } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import MarkdownIt from 'markdown-it'
 import {
   deleteUserSession,
   getSessionEmotion,
@@ -138,9 +149,32 @@ const sending = ref(false)
 const loadingSessions = ref(false)
 const emotionResult = ref(null)
 const messageListRef = ref(null)
+const abortController = ref(null)
+const stopSilently = ref(false)
+const markdown = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true
+})
+
+const defaultLinkOpen =
+  markdown.renderer.rules.link_open ||
+  ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options))
+
+markdown.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  const token = tokens[idx]
+  token.attrSet('target', '_blank')
+  token.attrSet('rel', 'noopener noreferrer')
+
+  return defaultLinkOpen(tokens, idx, options, env, self)
+}
 
 onMounted(() => {
   loadSessions()
+})
+
+onBeforeUnmount(() => {
+  stopGenerating({ silent: true })
 })
 
 async function loadSessions() {
@@ -164,6 +198,7 @@ function getSessionId(session) {
 }
 
 function startNewChat() {
+  stopGenerating({ silent: true })
   activeSessionId.value = ''
   currentTitle.value = '新的咨询'
   messages.value = []
@@ -175,6 +210,7 @@ async function selectSession(session) {
 
   if (!sessionId) return
 
+  stopGenerating({ silent: true })
   activeSessionId.value = sessionId
   currentTitle.value = session.title || session.sessionTitle || '心理咨询'
   emotionResult.value = null
@@ -188,7 +224,17 @@ function isUserMessage(message) {
   return Number(message.senderType) === 1 || message.role === 'user'
 }
 
+function getMessageContent(message) {
+  return message.content || message.messageContent || '正在生成回复...'
+}
+
+function renderMessageContent(message) {
+  return markdown.render(getMessageContent(message))
+}
+
 async function sendMessage() {
+  if (sending.value) return
+
   const text = messageText.value.trim()
 
   if (!text) {
@@ -197,6 +243,9 @@ async function sendMessage() {
   }
 
   sending.value = true
+  stopSilently.value = false
+  const controller = new AbortController()
+  abortController.value = controller
   messageText.value = ''
 
   const userMessage = {
@@ -218,10 +267,13 @@ async function sendMessage() {
     let startReply = ''
 
     if (isNewSession) {
-      const session = await startChatSession({
-        initialMessage: text,
-        sessionTitle: buildSessionTitle(text)
-      })
+      const session = await startChatSession(
+        {
+          initialMessage: text,
+          sessionTitle: buildSessionTitle(text)
+        },
+        { signal: controller.signal }
+      )
       activeSessionId.value = extractSessionId(session)
       currentTitle.value = extractSessionTitle(session) || buildSessionTitle(text)
       startReply = extractReply(session)
@@ -244,7 +296,8 @@ async function sendMessage() {
         (_chunk, fullText) => {
           aiMessage.content = fullText
           scrollToBottom()
-        }
+        },
+        { signal: controller.signal }
       )
 
       if (streamedText) {
@@ -258,12 +311,40 @@ async function sendMessage() {
 
     await loadSessions()
   } catch (error) {
+    if (isAbortError(error) || controller.signal.aborted) {
+      aiMessage.content = aiMessage.content || '已停止生成。'
+
+      if (!stopSilently.value) {
+        ElMessage.info('已停止生成')
+      }
+
+      return
+    }
+
     aiMessage.content = '发送失败，请稍后重试。'
     ElMessage.error(error?.message || 'AI 对话失败')
   } finally {
+    if (abortController.value === controller) {
+      abortController.value = null
+      stopSilently.value = false
+    }
+
     sending.value = false
     scrollToBottom()
   }
+}
+
+function stopGenerating(options = {}) {
+  const controller = abortController.value
+
+  if (!sending.value || !controller || controller.signal.aborted) return
+
+  stopSilently.value = Boolean(options.silent)
+  controller.abort()
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError' || error?.code === 'ERR_CANCELED'
 }
 
 function buildSessionTitle(text) {
@@ -553,10 +634,104 @@ function safeJsonParse(value) {
   opacity: 0.72;
 }
 
-.message-bubble p {
-  margin: 0;
+.message-content {
   line-height: 1.7;
-  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-content :deep(*) {
+  max-width: 100%;
+}
+
+.message-content :deep(p),
+.message-content :deep(ul),
+.message-content :deep(ol),
+.message-content :deep(blockquote),
+.message-content :deep(pre),
+.message-content :deep(table) {
+  margin: 0 0 10px;
+}
+
+.message-content :deep(*:last-child) {
+  margin-bottom: 0;
+}
+
+.message-content :deep(ul),
+.message-content :deep(ol) {
+  padding-left: 20px;
+}
+
+.message-content :deep(li + li) {
+  margin-top: 4px;
+}
+
+.message-content :deep(a) {
+  color: #2f7f72;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message-content :deep(code) {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #eef2f6;
+  color: #334155;
+  font-family: Consolas, Monaco, 'Courier New', monospace;
+  font-size: 0.92em;
+}
+
+.message-content :deep(pre) {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.message-content :deep(pre code) {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.message-content :deep(blockquote) {
+  padding: 8px 12px;
+  border-left: 3px solid #9fcfc5;
+  background: #f3faf7;
+  color: #475569;
+}
+
+.message-content :deep(table) {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.message-content :deep(th),
+.message-content :deep(td) {
+  padding: 6px 10px;
+  border: 1px solid #d8e2ea;
+}
+
+.message-content :deep(th) {
+  background: #f3f7fa;
+  font-weight: 700;
+}
+
+.from-user .message-content :deep(a) {
+  color: #fff;
+}
+
+.from-user .message-content :deep(code) {
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+}
+
+.from-user .message-content :deep(blockquote) {
+  border-left-color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
 }
 
 .composer {
@@ -565,6 +740,10 @@ function safeJsonParse(value) {
   gap: 10px;
   padding: 14px;
   border-top: 1px solid #eef2f6;
+}
+
+.composer-action {
+  min-width: 96px;
 }
 
 .analysis-content {
