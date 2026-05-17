@@ -225,11 +225,39 @@ function isUserMessage(message) {
 }
 
 function getMessageContent(message) {
-  return message.content || message.messageContent || '正在生成回复...'
+  return getRawMessageContent(message) || '正在生成回复...'
 }
 
 function renderMessageContent(message) {
   return markdown.render(getMessageContent(message))
+}
+
+function getRawMessageContent(message) {
+  return message.content || message.messageContent || ''
+}
+
+function buildAiMessages(excludedLocalId) {
+  return messages.value
+    .filter((message) => message.localId !== excludedLocalId)
+    .map((message) => {
+      const content = getRawMessageContent(message).trim()
+
+      if (!content) return null
+
+      return {
+        role: getAiMessageRole(message),
+        content
+      }
+    })
+    .filter(Boolean)
+}
+
+function getAiMessageRole(message) {
+  if (['system', 'user', 'assistant'].includes(message.role)) {
+    return message.role
+  }
+
+  return isUserMessage(message) ? 'user' : 'assistant'
 }
 
 async function sendMessage() {
@@ -264,7 +292,6 @@ async function sendMessage() {
 
   try {
     const isNewSession = !activeSessionId.value
-    let startReply = ''
 
     if (isNewSession) {
       const session = await startChatSession(
@@ -276,33 +303,25 @@ async function sendMessage() {
       )
       activeSessionId.value = extractSessionId(session)
       currentTitle.value = extractSessionTitle(session) || buildSessionTitle(text)
-      startReply = extractReply(session)
-
-      if (startReply) {
-        aiMessage.content = startReply
-      }
     }
 
     if (!activeSessionId.value) {
       throw new Error('后端未返回会话 ID')
     }
 
-    if (!startReply) {
-      const streamedText = await streamChatMessage(
-        {
-          sessionId: activeSessionId.value,
-          userMessage: text
-        },
-        (_chunk, fullText) => {
-          aiMessage.content = fullText
-          scrollToBottom()
-        },
-        { signal: controller.signal }
-      )
+    const streamedText = await streamChatMessage(
+      {
+        messages: buildAiMessages(aiMessage.localId)
+      },
+      (_chunk, fullText) => {
+        aiMessage.content = fullText
+        scrollToBottom()
+      },
+      { signal: controller.signal }
+    )
 
-      if (streamedText) {
-        aiMessage.content = streamedText
-      }
+    if (streamedText) {
+      aiMessage.content = streamedText
     }
 
     if (!aiMessage.content) {
@@ -357,21 +376,6 @@ function extractSessionId(data) {
 
 function extractSessionTitle(data) {
   return data?.title || data?.sessionTitle || data?.session?.title || data?.data?.title || ''
-}
-
-function extractReply(data) {
-  const content =
-    data?.aiMessage ||
-    data?.assistantMessage ||
-    data?.answer ||
-    data?.reply ||
-    data?.content ||
-    data?.data?.aiMessage ||
-    data?.data?.answer ||
-    data?.data?.reply ||
-    data?.message?.content
-
-  return typeof content === 'string' ? content : ''
 }
 
 async function loadEmotionAnalysis() {

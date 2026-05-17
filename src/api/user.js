@@ -1,5 +1,7 @@
 import request from '../utils/request'
 
+const AI_CHAT_API_URL = 'http://localhost:3000/ai/chat'
+
 export function registerUser(data) {
   return request.post('/user/add', data)
 }
@@ -73,20 +75,20 @@ function readStreamPayload(payload) {
 }
 
 export async function streamChatMessage(data, onChunk, options = {}) {
-  const token = localStorage.getItem('token')
-  const response = await fetch('/api/psychological-chat/stream', {
+  const response = await fetch(AI_CHAT_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-      ...(token ? { token } : {})
+      Accept: 'text/event-stream'
     },
     body: JSON.stringify(data),
     signal: options.signal
   })
 
   if (!response.ok) {
-    throw new Error(`AI 对话请求失败：${response.status}`)
+    const errorText = await response.text().catch(() => '')
+    const errorPayload = safeJsonParse(errorText) || errorText
+    throw new Error(readStreamError(errorPayload) || `AI 对话请求失败：${response.status}`)
   }
 
   const reader = response.body?.getReader()
@@ -200,14 +202,14 @@ function readStreamError(payload) {
   }
 
   const data = payload.data
+  const error = payload.error || data?.error
 
   return (
     payload.msg ||
     payload.message ||
-    payload.error ||
+    (typeof error === 'string' ? error : error?.message) ||
     data?.msg ||
     data?.message ||
-    data?.error ||
     ''
   )
 }
