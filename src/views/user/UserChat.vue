@@ -151,6 +151,8 @@ const emotionResult = ref(null)
 const messageListRef = ref(null)
 const abortController = ref(null)
 const stopSilently = ref(false)
+const MESSAGE_CACHE_STORAGE_KEY = 'user-chat-message-cache:v1'
+const messageCache = ref(loadMessageCache())
 const markdown = new MarkdownIt({
   html: false,
   linkify: true,
@@ -197,6 +199,160 @@ function getSessionId(session) {
   return String(session?.id || session?.sessionId || '')
 }
 
+function getStorage() {
+  if (typeof window === 'undefined') return null
+
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
+
+function getMessageCacheStorageKey() {
+  const storage = getStorage()
+  const userInfo = storage ? safeJsonParse(storage.getItem('userInfo')) : null
+  const userId = userInfo?.id || userInfo?.userId || userInfo?.username || userInfo?.account || 'guest'
+
+  return `${MESSAGE_CACHE_STORAGE_KEY}:${userId}`
+}
+
+function loadMessageCache() {
+  const storage = getStorage()
+
+  if (!storage) return {}
+
+  const parsed = safeJsonParse(storage.getItem(getMessageCacheStorageKey()))
+
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+}
+
+function persistMessageCache() {
+  const storage = getStorage()
+
+  if (!storage) return
+
+  try {
+    storage.setItem(getMessageCacheStorageKey(), JSON.stringify(messageCache.value))
+  } catch {
+    // localStorage can be full or disabled; the chat still works without the cache.
+  }
+}
+
+function getCachedSessionMessages(sessionId) {
+  const cachedMessages = messageCache.value[String(sessionId)] || []
+
+  return Array.isArray(cachedMessages) ? cachedMessages : []
+}
+
+function cacheSessionMessages(sessionId, nextMessages) {
+  const key = String(sessionId || '')
+
+  if (!key) return
+
+  const cachedMessages = nextMessages.map(normalizeCachedMessage).filter(Boolean)
+
+  if (cachedMessages.length === 0) return
+
+  messageCache.value = {
+    ...messageCache.value,
+    [key]: cachedMessages
+  }
+  persistMessageCache()
+}
+
+function removeCachedSession(sessionId) {
+  const key = String(sessionId || '')
+
+  if (!key || !messageCache.value[key]) return
+
+  const nextCache = { ...messageCache.value }
+  delete nextCache[key]
+  messageCache.value = nextCache
+  persistMessageCache()
+}
+
+function normalizeCachedMessage(message) {
+  if (!message) return null
+
+  const content = getRawMessageContent(message)
+
+  if (!content && !message.localId && !message.id && !message.messageId) return null
+
+  return {
+    id: message.id,
+    messageId: message.messageId,
+    localId: message.localId,
+    senderType: message.senderType,
+    role: message.role,
+    content,
+    createdAt: message.createdAt || message.createTime || ''
+  }
+}
+
+function mergeSessionMessages(remoteMessages, cachedMessages) {
+  const mergedMessages = []
+  const identities = new Set()
+  const remoteSignatureCounts = new Map()
+
+  const addRemoteMessage = (message) => {
+    const identity = getMessageIdentity(message)
+    const signature = getMessageSignature(message)
+
+    if (identity && identities.has(identity)) return
+
+    if (identity) identities.add(identity)
+    if (signature) {
+      remoteSignatureCounts.set(signature, (remoteSignatureCounts.get(signature) || 0) + 1)
+    }
+
+    mergedMessages.push(message)
+  }
+
+  remoteMessages.forEach(addRemoteMessage)
+
+  cachedMessages.forEach((message) => {
+    const identity = getMessageIdentity(message)
+    const signature = getMessageSignature(message)
+    const remoteSignatureCount = signature ? remoteSignatureCounts.get(signature) || 0 : 0
+
+    if (identity && identities.has(identity)) return
+
+    if (remoteSignatureCount > 0) {
+      remoteSignatureCounts.set(signature, remoteSignatureCount - 1)
+      return
+    }
+
+    if (identity) identities.add(identity)
+
+    mergedMessages.push(message)
+  })
+
+  return mergedMessages
+}
+
+function getMessageIdentity(message) {
+  const id = message?.id || message?.messageId
+
+  return id ? `id:${id}` : ''
+}
+
+function getMessageSignature(message) {
+  const content = getRawMessageContent(message).trim()
+
+  if (!content) return ''
+
+  return `${getAiMessageRole(message)}:${content}`
+}
+
+function formatMessageTime(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0')
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes()
+  )}`
+}
+
 function startNewChat() {
   stopGenerating({ silent: true })
   activeSessionId.value = ''
@@ -216,7 +372,9 @@ async function selectSession(session) {
   emotionResult.value = null
 
   const data = await getUserSessionMessages(sessionId)
-  messages.value = normalizeList(data)
+  const remoteMessages = normalizeList(data)
+  messages.value = mergeSessionMessages(remoteMessages, getCachedSessionMessages(sessionId))
+  cacheSessionMessages(sessionId, messages.value)
   scrollToBottom()
 }
 
@@ -236,8 +394,18 @@ function getRawMessageContent(message) {
   return message.content || message.messageContent || ''
 }
 
-function buildAiMessages(excludedLocalId) {
-  return messages.value
+function setMessageContent(messageList, targetMessage, content) {
+  targetMessage.content = content
+
+  const message = messageList.find((item) => item.localId === targetMessage.localId)
+
+  if (message) {
+    message.content = content
+  }
+}
+
+function buildAiMessages(excludedLocalId, sourceMessages = messages.value) {
+  return sourceMessages
     .filter((message) => message.localId !== excludedLocalId)
     .map((message) => {
       const content = getRawMessageContent(message).trim()
@@ -275,23 +443,31 @@ async function sendMessage() {
   const controller = new AbortController()
   abortController.value = controller
   messageText.value = ''
+  let targetSessionId = activeSessionId.value
+  const sessionMessages = messages.value
+  const createdAt = formatMessageTime()
 
   const userMessage = {
     localId: `user-${Date.now()}`,
     senderType: 1,
-    content: text
+    content: text,
+    createdAt
   }
   const aiMessage = {
     localId: `ai-${Date.now()}`,
     senderType: 2,
-    content: ''
+    content: '',
+    createdAt
   }
 
-  messages.value.push(userMessage, aiMessage)
+  sessionMessages.push(userMessage, aiMessage)
+  if (targetSessionId) {
+    cacheSessionMessages(targetSessionId, sessionMessages)
+  }
   scrollToBottom()
 
   try {
-    const isNewSession = !activeSessionId.value
+    const isNewSession = !targetSessionId
 
     if (isNewSession) {
       const session = await startChatSession(
@@ -301,37 +477,42 @@ async function sendMessage() {
         },
         { signal: controller.signal }
       )
-      activeSessionId.value = extractSessionId(session)
+      targetSessionId = extractSessionId(session)
+      activeSessionId.value = targetSessionId
       currentTitle.value = extractSessionTitle(session) || buildSessionTitle(text)
     }
 
-    if (!activeSessionId.value) {
+    if (!targetSessionId) {
       throw new Error('后端未返回会话 ID')
     }
 
+    cacheSessionMessages(targetSessionId, sessionMessages)
+
     const streamedText = await streamChatMessage(
       {
-        messages: buildAiMessages(aiMessage.localId)
+        messages: buildAiMessages(aiMessage.localId, sessionMessages)
       },
       (_chunk, fullText) => {
-        aiMessage.content = fullText
+        setMessageContent(sessionMessages, aiMessage, fullText)
         scrollToBottom()
       },
       { signal: controller.signal }
     )
 
     if (streamedText) {
-      aiMessage.content = streamedText
+      setMessageContent(sessionMessages, aiMessage, streamedText)
     }
 
     if (!aiMessage.content) {
-      aiMessage.content = 'AI 暂未返回内容，请稍后在会话记录中查看。'
+      setMessageContent(sessionMessages, aiMessage, 'AI 暂未返回内容，请稍后在会话记录中查看。')
     }
 
+    cacheSessionMessages(targetSessionId, sessionMessages)
     await loadSessions()
   } catch (error) {
     if (isAbortError(error) || controller.signal.aborted) {
-      aiMessage.content = aiMessage.content || '已停止生成。'
+      setMessageContent(sessionMessages, aiMessage, aiMessage.content || '已停止生成。')
+      cacheSessionMessages(targetSessionId, sessionMessages)
 
       if (!stopSilently.value) {
         ElMessage.info('已停止生成')
@@ -340,7 +521,8 @@ async function sendMessage() {
       return
     }
 
-    aiMessage.content = '发送失败，请稍后重试。'
+    setMessageContent(sessionMessages, aiMessage, '发送失败，请稍后重试。')
+    cacheSessionMessages(targetSessionId, sessionMessages)
     ElMessage.error(error?.message || 'AI 对话失败')
   } finally {
     if (abortController.value === controller) {
@@ -424,13 +606,16 @@ function riskTagType(level) {
 async function handleDeleteSession() {
   if (!activeSessionId.value) return
 
+  const sessionId = activeSessionId.value
+
   await ElMessageBox.confirm('确认删除当前会话吗？', '提示', {
     confirmButtonText: '删除',
     cancelButtonText: '取消',
     type: 'warning'
   })
 
-  await deleteUserSession(activeSessionId.value)
+  await deleteUserSession(sessionId)
+  removeCachedSession(sessionId)
   ElMessage.success('会话已删除')
   startNewChat()
   loadSessions()
