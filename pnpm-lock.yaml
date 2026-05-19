@@ -44,6 +44,9 @@ importers:
       vue-router:
         specifier: ^5.0.4
         version: 5.0.4(@vue/compiler-sfc@3.5.31)(pinia@3.0.4(vue@3.5.31))(vue@3.5.31)
+      vue-virtual-scroller:
+        specifier: ^2.0.1
+        version: 2.0.1(vue@3.5.31)
     devDependencies:
       '@vitejs/plugin-vue':
         specifier: ^6.0.5
@@ -934,6 +937,9 @@ packages:
   min-document@0.2.8:
     resolution: {integrity: sha512-ri+szIofvuuGNJyf9sSpZNflnMoB1Cc+1B/yEksib+YXF/9CdnKABVFMk0n4+RTXP5bRSp8kP5NbpdMHGmabbw==}
 
+  mitt@2.1.0:
+    resolution: {integrity: sha512-ILj2TpLiysu2wkBbWjAmww7TkZb65aiQO+DkVdUTBpBXq+MHYiETENkKFMtsJZX1Lf4pe4QOrTSjIfUwN5lRdg==}
+
   mitt@3.0.1:
     resolution: {integrity: sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw==}
 
@@ -1176,6 +1182,11 @@ packages:
         optional: true
       pinia:
         optional: true
+
+  vue-virtual-scroller@2.0.1:
+    resolution: {integrity: sha512-3Drq8C61C4B3reSaZJr5nXBf/B7Beq1+h5/kYZB25MLYljTy97ISeUufRX9z6ZSZlFDXyafAOLK9XwajOWJY1A==}
+    peerDependencies:
+      vue: ^3.3.0
 
   vue@3.5.31:
     resolution: {integrity: sha512-iV/sU9SzOlmA/0tygSmjkEN6Jbs3nPoIPFhCMLD2STrjgOU8DX7ZtzMhg4ahVwf5Rp9KoFzcXeB1ZrVbLBp5/Q==}
@@ -2057,6 +2068,8 @@ snapshots:
     dependencies:
       tape: 1.0.4
 
+  mitt@2.1.0: {}
+
   mitt@3.0.1: {}
 
   mlly@1.8.2:
@@ -2275,6 +2288,11 @@ snapshots:
     optionalDependencies:
       '@vue/compiler-sfc': 3.5.31
       pinia: 3.0.4(vue@3.5.31)
+
+  vue-virtual-scroller@2.0.1(vue@3.5.31):
+    dependencies:
+      mitt: 2.1.0
+      vue: 3.5.31
 
   vue@3.5.31:
     dependencies:

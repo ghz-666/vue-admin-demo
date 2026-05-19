@@ -41,30 +41,46 @@
         </div>
       </div>
 
-      <div ref="messageListRef" class="message-list">
-        <div v-if="messages.length === 0" class="empty-chat">
+      <div v-if="messages.length === 0" class="message-list">
+        <div class="empty-chat">
           <el-icon>
             <ChatRound />
           </el-icon>
           <h3>开始一次安全、私密的倾诉</h3>
           <p>描述你的感受、压力来源或今天发生的事,AI 会返回支持性建议。</p>
         </div>
-
-        <div
-          v-for="message in messages"
-          :key="message.localId || message.id"
-          class="message-row"
-          :class="isUserMessage(message) ? 'from-user' : 'from-ai'"
-        >
-          <div class="message-bubble">
-            <div class="message-meta">
-              <span>{{ isUserMessage(message) ? '我' : 'AI 助手' }}</span>
-              <span>{{ message.createdAt || message.createTime || '' }}</span>
-            </div>
-            <div class="message-content" v-html="renderMessageContent(message)"></div>
-          </div>
-        </div>
       </div>
+
+      <DynamicScroller
+        v-else
+        ref="messageScrollerRef"
+        class="message-list virtual-message-list"
+        :items="messages"
+        :min-item-size="MESSAGE_SCROLLER_MIN_ITEM_SIZE"
+        :key-field="CHAT_MESSAGE_KEY_FIELD"
+        :buffer="480"
+      >
+        <template #default="{ item, index, active }">
+          <DynamicScrollerItem
+            :item="item"
+            :active="active"
+            :index="index"
+            :size-dependencies="[getRawMessageContent(item), item.createdAt, item.createTime]"
+            :data-index="index"
+            class="message-scroller-item"
+          >
+            <div class="message-row" :class="isUserMessage(item) ? 'from-user' : 'from-ai'">
+              <div class="message-bubble">
+                <div class="message-meta">
+                  <span>{{ isUserMessage(item) ? '我' : 'AI 助手' }}</span>
+                  <span>{{ item.createdAt || item.createTime || '' }}</span>
+                </div>
+                <div class="message-content" v-html="renderMessageContent(item)"></div>
+              </div>
+            </div>
+          </DynamicScrollerItem>
+        </template>
+      </DynamicScroller>
 
       <div class="composer">
         <el-input
@@ -131,6 +147,8 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CircleClose, Delete, Plus, Promotion, TrendCharts } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownIt from 'markdown-it'
+import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
+import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 import {
   deleteUserSession,
   getSessionEmotion,
@@ -148,10 +166,12 @@ const messageText = ref('')
 const sending = ref(false)
 const loadingSessions = ref(false)
 const emotionResult = ref(null)
-const messageListRef = ref(null)
+const messageScrollerRef = ref(null)
 const abortController = ref(null)
 const stopSilently = ref(false)
 const MESSAGE_CACHE_STORAGE_KEY = 'user-chat-message-cache:v1'
+const CHAT_MESSAGE_KEY_FIELD = 'virtualId'
+const MESSAGE_SCROLLER_MIN_ITEM_SIZE = 96
 const messageCache = ref(loadMessageCache())
 const markdown = new MarkdownIt({
   html: false,
@@ -193,6 +213,43 @@ async function loadSessions() {
 function normalizeList(data) {
   if (Array.isArray(data)) return data
   return data?.records || data?.list || data?.rows || data?.messages || []
+}
+
+function prepareMessagesForVirtualScroll(nextMessages) {
+  return nextMessages.map((message, index) => ensureMessageVirtualKey(message, index)).filter(Boolean)
+}
+
+function ensureMessageVirtualKey(message, index) {
+  if (!message) return null
+
+  if (!message[CHAT_MESSAGE_KEY_FIELD]) {
+    message[CHAT_MESSAGE_KEY_FIELD] = buildMessageVirtualKey(message, index)
+  }
+
+  return message
+}
+
+function buildMessageVirtualKey(message, index) {
+  const id = message.localId || message.id || message.messageId
+
+  if (id) return String(id)
+
+  const role = getAiMessageRole(message)
+  const createdAt = message.createdAt || message.createTime || ''
+  const contentHash = hashString(getRawMessageContent(message))
+
+  return `${role}-${createdAt}-${index}-${contentHash}`
+}
+
+function hashString(value = '') {
+  let hash = 0
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index)
+    hash |= 0
+  }
+
+  return Math.abs(hash).toString(36)
 }
 
 function getSessionId(session) {
@@ -373,7 +430,7 @@ async function selectSession(session) {
 
   const data = await getUserSessionMessages(sessionId)
   const remoteMessages = normalizeList(data)
-  messages.value = mergeSessionMessages(remoteMessages, getCachedSessionMessages(sessionId))
+  messages.value = prepareMessagesForVirtualScroll(mergeSessionMessages(remoteMessages, getCachedSessionMessages(sessionId)))
   cacheSessionMessages(sessionId, messages.value)
   scrollToBottom()
 }
@@ -460,7 +517,10 @@ async function sendMessage() {
     createdAt
   }
 
-  sessionMessages.push(userMessage, aiMessage)
+  sessionMessages.push(
+    ensureMessageVirtualKey(userMessage, sessionMessages.length),
+    ensureMessageVirtualKey(aiMessage, sessionMessages.length + 1)
+  )
   if (targetSessionId) {
     cacheSessionMessages(targetSessionId, sessionMessages)
   }
@@ -623,8 +683,26 @@ async function handleDeleteSession() {
 
 function scrollToBottom() {
   nextTick(() => {
-    if (!messageListRef.value) return
-    messageListRef.value.scrollTop = messageListRef.value.scrollHeight
+    requestAnimationFrame(() => {
+      const scroller = messageScrollerRef.value
+      const lastIndex = messages.value.length - 1
+
+      if (!scroller || lastIndex < 0) return
+
+      if (typeof scroller.scrollToBottom === 'function') {
+        scroller.scrollToBottom()
+      } else if (typeof scroller.scrollToItem === 'function') {
+        scroller.scrollToItem(lastIndex)
+      }
+
+      requestAnimationFrame(() => {
+        const scrollElement = scroller.$el
+
+        if (scrollElement) {
+          scrollElement.scrollTop = scrollElement.scrollHeight
+        }
+      })
+    })
   })
 }
 
@@ -756,8 +834,18 @@ function safeJsonParse(value) {
   flex: 1;
   min-height: 0;
   padding: 18px;
+  box-sizing: border-box;
   overflow: auto;
   background: #fbfdff;
+}
+
+.message-scroller-item {
+  box-sizing: border-box;
+  padding-bottom: 14px;
+}
+
+.virtual-message-list .message-row {
+  margin-bottom: 0;
 }
 
 .empty-chat {
