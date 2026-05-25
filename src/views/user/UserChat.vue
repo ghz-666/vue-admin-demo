@@ -93,6 +93,15 @@
           @keydown.enter.exact.prevent="sendMessage"
         />
         <el-button
+          class="composer-action voice-action"
+          :type="isRecognizing ? 'warning' : ''"
+          plain
+          :icon="Microphone"
+          @click="toggleVoiceRecognition"
+        >
+          {{ isRecognizing ? '停止识别' : '语音输入' }}
+        </el-button>
+        <el-button
           v-if="sending"
           class="composer-action"
           type="danger"
@@ -144,7 +153,7 @@
 
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { CircleClose, Delete, Plus, Promotion, TrendCharts } from '@element-plus/icons-vue'
+import { CircleClose, Delete, Microphone, Plus, Promotion, TrendCharts } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownIt from 'markdown-it'
 import { DynamicScroller, DynamicScrollerItem } from 'vue-virtual-scroller'
@@ -169,6 +178,9 @@ const emotionResult = ref(null)
 const messageScrollerRef = ref(null)
 const abortController = ref(null)
 const stopSilently = ref(false)
+const speechRecognition = ref(null)
+const isRecognizing = ref(false)
+const stopRecognitionSilently = ref(false)
 const MESSAGE_CACHE_STORAGE_KEY = 'user-chat-message-cache:v1'
 const CHAT_MESSAGE_KEY_FIELD = 'virtualId'
 const MESSAGE_SCROLLER_MIN_ITEM_SIZE = 96
@@ -197,7 +209,111 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopGenerating({ silent: true })
+  stopVoiceRecognition({ abort: true })
 })
+
+function getSpeechRecognitionConstructor() {
+  if (typeof window === 'undefined') return null
+
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null
+}
+
+function toggleVoiceRecognition() {
+  if (isRecognizing.value) {
+    stopVoiceRecognition()
+    return
+  }
+
+  startVoiceRecognition()
+}
+
+function startVoiceRecognition() {
+  const SpeechRecognition = getSpeechRecognitionConstructor()
+
+  if (!SpeechRecognition) {
+    ElMessage.warning('当前浏览器不支持语音输入')
+    return
+  }
+
+  const recognition = new SpeechRecognition()
+  const baseText = messageText.value
+  speechRecognition.value = recognition
+  stopRecognitionSilently.value = false
+
+  recognition.lang = 'zh-CN'
+  recognition.continuous = false
+  recognition.interimResults = true
+  recognition.maxAlternatives = 1
+
+  recognition.onstart = () => {
+    isRecognizing.value = true
+  }
+
+  recognition.onresult = (event) => {
+    let transcript = ''
+
+    for (let index = 0; index < event.results.length; index += 1) {
+      transcript += event.results[index][0]?.transcript || ''
+    }
+
+    messageText.value = mergeVoiceTranscript(baseText, transcript)
+  }
+
+  recognition.onerror = () => {
+    if (!stopRecognitionSilently.value) {
+      ElMessage.error('语音识别失败，请检查麦克风权限')
+    }
+  }
+
+  recognition.onend = () => {
+    if (speechRecognition.value === recognition) {
+      speechRecognition.value = null
+    }
+
+    isRecognizing.value = false
+    stopRecognitionSilently.value = false
+  }
+
+  try {
+    isRecognizing.value = true
+    recognition.start()
+  } catch {
+    speechRecognition.value = null
+    isRecognizing.value = false
+    ElMessage.error('语音识别失败，请检查麦克风权限')
+  }
+}
+
+function stopVoiceRecognition(options = {}) {
+  const recognition = speechRecognition.value
+
+  if (!recognition) {
+    isRecognizing.value = false
+    return
+  }
+
+  stopRecognitionSilently.value = true
+  isRecognizing.value = false
+
+  try {
+    if (options.abort && typeof recognition.abort === 'function') {
+      recognition.abort()
+    } else {
+      recognition.stop()
+    }
+  } catch {
+    speechRecognition.value = null
+  }
+}
+
+function mergeVoiceTranscript(baseText, transcript) {
+  const text = transcript.trim()
+
+  if (!text) return baseText
+  if (!baseText) return text
+
+  return `${baseText}${baseText.endsWith('\n') ? '' : '\n'}${text}`
+}
 
 async function loadSessions() {
   loadingSessions.value = true
@@ -1013,7 +1129,7 @@ function safeJsonParse(value) {
 
 .composer {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   gap: 10px;
   padding: 14px;
   border-top: 1px solid #eef2f6;
