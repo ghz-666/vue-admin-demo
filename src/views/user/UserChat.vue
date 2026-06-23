@@ -131,6 +131,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { CircleClose, Delete, Plus, Promotion, TrendCharts } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import MarkdownIt from 'markdown-it'
+import DOMPurify from 'dompurify'
 import {
   deleteUserSession,
   getSessionEmotion,
@@ -229,7 +230,13 @@ function getMessageContent(message) {
 }
 
 function renderMessageContent(message) {
-  return markdown.render(getMessageContent(message))
+  const rawText = getMessageContent(message)
+  const html = markdown.render(rawText)
+
+  return DOMPurify.sanitize(html, {
+    ADD_ATTR: ['target', 'rel'],
+    FORBID_TAGS: ['script', 'iframe', 'object', 'embed']
+  })
 }
 
 async function sendMessage() {
